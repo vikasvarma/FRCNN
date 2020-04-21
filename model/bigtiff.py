@@ -243,7 +243,7 @@ class TIFFAdapter:
                 # Error if expected bytes are not read:
                 if not _readSize.value - _tileBytes is 0:
                     raise BigTiffException(\
-                        'Read an unexpected number of bytes from an encoded tile for channel %d.' % _sample)
+                        'Read an unexpected number of bytes from an encoded  tile for channel %d.' % _sample)
                     
                 # Append to channels:
                 _channel = np.ctypeslib.as_array(ctypes.cast(_channelBuffer, \
@@ -253,10 +253,6 @@ class TIFFAdapter:
                 
             # Convert the channels to a stacked image tile:
             _tile = np.stack(channels, axis=2)
-        
-        # Convert this numpy array to a pytorch tensor on the GPU.
-        # NOTE: This does NOT perform data copy
-        #_tile = torch.as_tensor(_tile, device=torch.device('cuda'))
         
         # Done.
         return _tile
@@ -292,13 +288,6 @@ class Bigtiff():
         self.PatchSize      = [[2*meta['TILELENGTH'], 2*meta['TILEWIDTH']] \
                                 for meta in self._adapter.Metadata]
         self.DirectoryID    = 0
-        
-        # Identify the total number of blocks in each image:
-        self.NumPatches     = np.ceil(np.divide(self.ImageSize, self.PatchSize))
-        self.TotalPatches   = np.sum(np.prod(self.NumPatches, 1))
-        
-        # Create patch list for sequential read:
-        self._createPatchList()
         
     #---------------------------------------------------------------------------
     def __del__(self):
@@ -362,18 +351,6 @@ class Bigtiff():
             return _photometric
     
     #---------------------------------------------------------------------------
-    def _createPatchList(self):
-        # Create a list of patches to be read from the TIFF directory.
-        _numPatches = self.NumPatches[self.DirectoryID]
-        _rows, _cols = np.meshgrid(np.arange(0,_numPatches[0]-1), \
-                                   np.arange(0,_numPatches[1]-1))
-        _rows = _rows.flatten()
-        _cols = _cols.flatten()
-        
-        self.PatchList = np.column_stack((_rows, _cols)).astype(int)
-        self._currentPatch = 0
-    
-    #---------------------------------------------------------------------------
     def setDirectory(self, dirNum):
         # Need this set before all I/O.
         self.DirectoryID = dirNum
@@ -384,14 +361,15 @@ class Bigtiff():
         self.PatchSize[self.DirectoryID] = patchSize
     
     #---------------------------------------------------------------------------
-    def getPatch(self, r, c):
+    def getPatch(self, origin):
         """
             Retrieve the patch [r,c] patch of the image from the current directory.
         """
         
         # Find all tiles required to stitch the patch:
-        _patchOrigin = np.array([r*self.PatchSize[self.DirectoryID][0],
-                                 c*self.PatchSize[self.DirectoryID][1]])
+        # _patchOrigin = np.array([r*self.PatchSize[self.DirectoryID][0],
+        #                         c*self.PatchSize[self.DirectoryID][1]])
+        _patchOrigin = origin
         _patchEnd    = _patchOrigin + self.PatchSize[self.DirectoryID] - 1
         
         # Bound patch locations to image size:
@@ -432,19 +410,5 @@ class Bigtiff():
         if not np.array_equal(_patchSize, _readSize[1:2]):
             _patch = _patch[0:_patchSize[0], 0:_patchSize[1]]
                
-        return _patch
-    
-    #---------------------------------------------------------------------------
-    def read(self):
-        """
-            Sequentially read all set of patches from the image.
-        """
-        # Get current patch id:
-        _patchIndex = self.PatchList[self._currentPatch]
-        _patch      = self.getPatch(_patchIndex[0], _patchIndex[1])
-        
-        # Increment current patch id:
-        self._currentPatch += 1
-        
         return _patch
 #_______________________________________________________________________________
