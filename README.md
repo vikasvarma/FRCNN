@@ -1,2 +1,2 @@
 # FRCNN
- Fast R-CNN Open AI Challenge
+ Faster R-CNN Open AI Carribean Challenge
