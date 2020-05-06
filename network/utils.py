@@ -27,7 +27,7 @@ def centrehw(roi):
                     torch.clamp(roi[:,:,2] - roi[:,:,0] + 1, min=_eps),
                     torch.clamp(roi[:,:,3] - roi[:,:,1] + 1, min=_eps)
                 ), dim=2)
-        
+    
     return _ctrhw_roi
 
 #-------------------------------------------------------------------------------

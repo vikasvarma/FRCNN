@@ -9,13 +9,9 @@ import math
 import os
 import numpy as np
 import torch
-from abc import ABC, abstractmethod
 from libtiff import libtiff_ctypes
 from libtiff.libtiff_ctypes import TIFF
 from libtiff.libtiff_ctypes import libtiff as _tiflib
-
-# Disable TIFF library warnings.
-libtiff_ctypes.suppress_warnings()
 
 # ------------------------------------------------------------------------------
 # TIFF Exception Handling Class Definition
@@ -51,20 +47,19 @@ class SpatialMap:
         self.XLimits   = xlimits
         self.YLimits   = ylimits
 
-        # Compute pixel spacing: (stored as XY coordinates)
+        # Compute pixel spacing:
         self.PixelSpacing = np.concatenate([np.diff(xlimits), np.diff(ylimits)])
         self.PixelSpacing = self.PixelSpacing / np.flip(imageSize)
 
     def image2Spatial(self, indices):
         # Converts the image ROW-by-COL indices to world coordinates.
-        coordinates = np.multiply(np.flip(indices, axis=1) - 0.5, 
-                                  self.PixelSpacing)
+        coordinates = np.multiply(np.flip(indices) - 0.5, self.PixelSpacing)
         coordinates += np.array([self.XLimits[0], self.YLimits[0]])
 
         # Bound the coordinate to world extents:
-        coordinates[:,0] = np.clip(coordinates[:,0],
+        coordinates[...,0] = np.clip(coordinates[...,0], \
                                    self.XLimits[0], self.XLimits[1])
-        coordinates[:,1] = np.clip(coordinates[:,1],
+        coordinates[...,1] = np.clip(coordinates[...,1], \
                                    self.YLimits[0], self.YLimits[1])
 
         # Done, return:
@@ -72,16 +67,15 @@ class SpatialMap:
     
     def spatial2Image(self, coordinates):
         # Converts X and Y world coordinates to image indices.
-        origin  = np.array([self.XLimits[0], self.YLimits[0]])
-        indices = np.subtract(coordinates, origin)
-        indices = np.floor(np.divide(indices, self.PixelSpacing))
-
-        # Flip to row-col:
-        indices = np.flip(indices, axis=1)
+        indices = np.subtract(np.flip(coordinates), \
+                              np.array([self.XLimits[0], self.YLimits[0]]))
+        indices = np.floor( np.divide(indices, self.PixelSpacing) )
 
         # Clip the indices to image extents:
-        indices[:,0] = np.clip(indices[:,0], 0, self.ImageSize[0])
-        indices[:,1] = np.clip(indices[:,1], 0, self.ImageSize[1])
+        indices[...,0] = np.clip(indices[...,0], \
+                               self.ImageSize[0], self.ImageSize[1])
+        indices[...,1] = np.clip(indices[...,1], \
+                               self.ImageSize[0], self.ImageSize[1])
 
         # Done, return:
         return indices
@@ -209,8 +203,7 @@ class TIFFAdapter:
         """
         
         # Set associated TIFF directory:
-        if _tiflib.TIFFCurrentDirectory != dirnum:
-            _tiflib.TIFFSetDirectory(self._tiff, dirnum)
+        _tiflib.TIFFSetDirectory(self._tiff, dirnum)
         
         # TODO - Support separate planar config.
         # Assume CONTIG/CHUNKY Planar Configuration:
@@ -250,7 +243,7 @@ class TIFFAdapter:
                 # Error if expected bytes are not read:
                 if not _readSize.value - _tileBytes is 0:
                     raise BigTiffException(\
-                        'Read an unexpected number of bytes from an encoded  tile for channel %d.' % _sample)
+                        'Read an unexpected number of bytes from an encoded tile for channel %d.' % _sample)
                     
                 # Append to channels:
                 _channel = np.ctypeslib.as_array(ctypes.cast(_channelBuffer, \
@@ -260,6 +253,10 @@ class TIFFAdapter:
                 
             # Convert the channels to a stacked image tile:
             _tile = np.stack(channels, axis=2)
+        
+        # Convert this numpy array to a pytorch tensor on the GPU.
+        # NOTE: This does NOT perform data copy
+        #_tile = torch.as_tensor(_tile, device=torch.device('cuda'))
         
         # Done.
         return _tile
@@ -284,7 +281,6 @@ class Bigtiff():
         #   3. Store some important metadata in-house.
         
         # Construct an adapter for I/O
-        self.Source         = filename
         self._adapter       = TIFFAdapter(filename, mode='r')
         
         # Derive image properties:
@@ -296,6 +292,13 @@ class Bigtiff():
         self.PatchSize      = [[2*meta['TILELENGTH'], 2*meta['TILEWIDTH']] \
                                 for meta in self._adapter.Metadata]
         self.DirectoryID    = 0
+        
+        # Identify the total number of blocks in each image:
+        self.NumPatches     = np.ceil(np.divide(self.ImageSize, self.PatchSize))
+        self.TotalPatches   = np.sum(np.prod(self.NumPatches, 1))
+        
+        # Create patch list for sequential read:
+        self._createPatchList()
         
     #---------------------------------------------------------------------------
     def __del__(self):
@@ -359,30 +362,36 @@ class Bigtiff():
             return _photometric
     
     #---------------------------------------------------------------------------
+    def _createPatchList(self):
+        # Create a list of patches to be read from the TIFF directory.
+        _numPatches = self.NumPatches[self.DirectoryID]
+        _rows, _cols = np.meshgrid(np.arange(0,_numPatches[0]-1), \
+                                   np.arange(0,_numPatches[1]-1))
+        _rows = _rows.flatten()
+        _cols = _cols.flatten()
+        
+        self.PatchList = np.column_stack((_rows, _cols)).astype(int)
+        self._currentPatch = 0
+    
+    #---------------------------------------------------------------------------
     def setDirectory(self, dirNum):
         # Need this set before all I/O.
         self.DirectoryID = dirNum
     
-    #---------------------------------------------------------------------------
-    def setSpatialMap(self, refmaps):
-        # Need this set before all I/O.
-        self.SpatialMapping = refmaps
-        
     #---------------------------------------------------------------------------
     def setPatchSize(self, patchSize):
         # Set the patch size associated with reading the image
         self.PatchSize[self.DirectoryID] = patchSize
     
     #---------------------------------------------------------------------------
-    def getPatch(self, origin):
+    def getPatch(self, r, c):
         """
             Retrieve the patch [r,c] patch of the image from the current directory.
         """
         
         # Find all tiles required to stitch the patch:
-        # _patchOrigin = np.array([r*self.PatchSize[self.DirectoryID][0],
-        #                         c*self.PatchSize[self.DirectoryID][1]])
-        _patchOrigin = origin
+        _patchOrigin = np.array([r*self.PatchSize[self.DirectoryID][0],
+                                 c*self.PatchSize[self.DirectoryID][1]])
         _patchEnd    = _patchOrigin + self.PatchSize[self.DirectoryID] - 1
         
         # Bound patch locations to image size:
@@ -424,103 +433,18 @@ class Bigtiff():
             _patch = _patch[0:_patchSize[0], 0:_patchSize[1]]
                
         return _patch
+    
+    #---------------------------------------------------------------------------
+    def read(self):
+        """
+            Sequentially read all set of patches from the image.
+        """
+        # Get current patch id:
+        _patchIndex = self.PatchList[self._currentPatch]
+        _patch      = self.getPatch(_patchIndex[0], _patchIndex[1])
+        
+        # Increment current patch id:
+        self._currentPatch += 1
+        
+        return _patch
 #_______________________________________________________________________________
-
-# ------------------------------------------------------------------------------
-# BigTiff Dataset class to sequentially load batches of data from BigTIFF files.
-# ------------------------------------------------------------------------------
-class BigtiffDataset(torch.utils.data.Dataset, ABC):
-    """
-        Dataset class for sequential patch loading.
-    """
-    
-    # --------------------------------------------------------------------------
-    def __init__(self, images, samples=None):
-        """
-            Constructor
-        """
-        super(BigtiffDataset, self).__init__()
-        
-        self.BigTIFFs = images
-        if samples is None:
-            self.Samples = self.createSamples(images)
-        else:
-            self.Samples = samples
-    
-    # --------------------------------------------------------------------------
-    def __len__(self):
-        return len(self.Samples)
-    
-    # --------------------------------------------------------------------------
-    def createSamples(self, images, stride=None):
-        """
-            Default sampling policy to sample contiguous patches from specified bigTIFFs at current directory.
-        """
-        _samples     = np.empty((0,3), dtype=np.int)
-        image_number = 0
-        
-        for region in images:
-            _btif    = images[region]
-            _imsize  = _btif.ImageSize[_btif.DirectoryID]
-            
-            if stride is None:
-                # Sample at a stride of patch size, incomplete patches at image
-                # borders are excluded.
-                _stride = _btif.PatchSize[_btif.DirectoryID]
-            else:
-                _stride = stride
-            
-            # Create sampling locations:
-            _rows = np.arange(0, _imsize[0], _stride[0])
-            _cols = np.arange(0, _imsize[1], _stride[1])
-            
-            _prows, _pcols = np.meshgrid(_rows, _cols)
-            _img_num = np.array([image_number]).repeat(_prows.size)
-            _pcord = np.column_stack((_img_num.flatten(),
-                                      _prows.flatten(), 
-                                      _pcols.flatten())).astype(int)
-            
-            _samples = np.append(_samples, _pcord, axis=0)
-            
-            image_number += 1
-        
-        # Done.
-        return _samples
-    
-    # --------------------------------------------------------------------------
-    def filterSamples(self):
-        """ Retains samples which have ROIs inside them."""
-        retain = np.array([False]).repeat(self.Samples.shape[0])
-        for sampleid in range(self.Samples.shape[0]):
-            rois = self.__getrois__(sampleid)
-            retain[sampleid] = rois.size != 0
-        
-        self.Samples = self.Samples[retain, :]
-    
-    # --------------------------------------------------------------------------
-    def define_samples(self, sampling_policy):
-        self.Samples = sampling_policy
-    
-    # --------------------------------------------------------------------------
-    @abstractmethod
-    def __getrois__(self, index):
-        raise NotImplementedError('Abstract method __getlabels__ is not implemented.')
-    
-    # --------------------------------------------------------------------------
-    def __getitem__(self, index):
-        """
-            Returns a single image patch (sample)
-        """
-        
-        # Get sample patch at specified index:
-        sample_def = self.Samples[index]
-        regions    = list(self.BigTIFFs.keys())
-        btif       = self.BigTIFFs[regions[sample_def[0]]]
-        origin     = sample_def[1:]
-        patch      = btif.getPatch(origin)
-        
-        # Get corresponding labels:
-        bboxes     = self.__getrois__(index)
-        
-        return patch, bboxes        
-# ______________________________________________________________________________

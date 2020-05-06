@@ -13,9 +13,8 @@ Module Information
 
 from   torch.autograd   import Variable
 from   torch            import nn
-from   model.roi_layers import ROIPool
+from   config           import Config
 from   .rpn             import RPN
-from   .config          import Config
 from   .utils           import *
 from   torchvision.ops  import roi_pool
 import torch

@@ -16,24 +16,23 @@ class Config:
     """
 
     # Training Parameters ____________________________________________________________________________
-    class TRAIN:
-        TRAINING = True
+    TRAIN         = True
+    NUM_WORKERS   = 8
+    LEARNING_RATE = 0.001
+    MOMENTUM      = 0.9
+    WEIGHT_DECAY  = 0.0005
+    GAMMA         = 0.1
     
     # Faster R-CNN Parameters ____________________________________________________________________________
     class FRCNN:
-        FEATURE_SIZE      = [5, 3, 640, 640]
+        FEATURE_SIZE      = [64, 3, 800, 800]
         SPATIAL_SCALE     = VGG_SPATIAL_SCALE
         ADAPTIVEPOOL_SIZE = (7, 7)
         ROI_POSITIVE_THR  = (0.5, 1.0)
         ROI_NEGATIVE_THR  = (0.0, 0.5)
         ROI_SAMPLES       = 128
         ROI_SAMPLE_RATIO  = 0.25
-        
     
-    # Big TIFF Parameters ____________________________________________________________________________
-    class BIGTIFF:
-        BLOCKSIZE = [1024, 1024]
-
     # RPN Parameters ____________________________________________________________________________
     class RPN:
         
