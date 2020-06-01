@@ -8,7 +8,6 @@ import torch
 from torch import nn
 from torch.nn import functional as fcn
 import numpy as np
-from torch.autograd import Variable
 from .config import Config
 from .utils import *
 
@@ -100,39 +99,31 @@ class ProposalLayer(nn.Module):
         # Get anchors and expand to scale to batch size:
         _batchSize   = pred_boxes.size(0)
         _anchorSize  = self.Anchors.size(0)
-        anchors      = self.Anchors.expand(_batchSize, _anchorSize, 4)\
-                           .type(gt_boxes.dtype)
-        ctrhwAnchors = self.CtrHWAnchors.expand(_batchSize, _anchorSize, 4)\
-                           .type(gt_boxes.dtype)
+        
+        anchors      = self.Anchors.expand(_batchSize, _anchorSize, 4)
+        anchors      = anchors.type(gt_boxes.dtype).to(gt_boxes.device)
+        ctrhwAnchors = self.CtrHWAnchors.expand(_batchSize, _anchorSize, 4)
+        ctrhwAnchors = ctrhwAnchors.type(gt_boxes.dtype).to(gt_boxes.device)
         
         # Predicted Top Bounding Box Proposals: ________________________________________________________________________
         # Convert proposals from target coefficients to bounding box
         # coordinates:
-        _ctrhwBbox  = invtargets(pred_boxes, anchors)
+        _ctrhwBbox  = invtargets(pred_boxes, ctrhwAnchors)
         proposals   = yxcord(_ctrhwBbox)
         
         # Clamp the proposals to the image extents:
-        proposals[:,:,0].clamp_(min=0, max=self.InputSize[2] * self._stride)
-        proposals[:,:,1].clamp_(min=0, max=self.InputSize[3] * self._stride)
-        proposals[:,:,2].clamp_(min=0, max=self.InputSize[2] * self._stride)
-        proposals[:,:,3].clamp_(min=0, max=self.InputSize[3] * self._stride)
-        
-        # Filter out proposals with either width or height less than minimum 
-        # size threshold.
-        _ctrhwBbox = centrehw(proposals)
-        _minSize   = Config.RPN.MIN_BOX_SIZE
-        _size_keep = torch.nonzero((_ctrhwBbox[:,:,2] >= _minSize) &
-                                   (_ctrhwBbox[:,:,3] >= _minSize))
-        _size_keep = _size_keep.split(1, dim=1)[1].view(-1)
-        proposals  = proposals[:, _size_keep, :]
-        pos_scores = pos_scores[:, _size_keep]
+        proposals[:,:,0].clamp_(min=0, max=(self.InputSize[2] * self._stride)-1)
+        proposals[:,:,1].clamp_(min=0, max=(self.InputSize[3] * self._stride)-1)
+        proposals[:,:,2].clamp_(min=0, max=(self.InputSize[2] * self._stride)-1)
+        proposals[:,:,3].clamp_(min=0, max=(self.InputSize[3] * self._stride)-1)
         
         # Apply non-maximal supression to obtain top scoring targets:
-        top_proposals = nms(proposals, pos_scores)
+        top_proposals = nms(proposals, pos_scores, self.training)
+        top_proposals = torch.floor(top_proposals)
         
         # TRAINING: Obtain Ground Truth Bounding Box Targets and use these
         #           to compute RPN bbox prediction and classification loss._______________________________________________________________________
-        if Config.TRAIN.TRAINING:
+        if self.training:
             # Compute ground truth boxes overlap with anchors and label the
             # anchors. Only consider anchors that are completely inside the 
             # image for training.
@@ -157,7 +148,7 @@ class ProposalLayer(nn.Module):
                 
             gt_bbox_targets = centrehw(gt_bbox_targets)
             gt_bbox_targets = targets(gt_bbox_targets, ctrhwAnchors)
-            gt_bbox_targets = Variable(gt_bbox_targets)
+            gt_bbox_targets = gt_bbox_targets.requires_grad_()
             
             # Calculate RPN Losses: ____________________________________________________________________
             # 1. Classification Loss:
@@ -166,10 +157,10 @@ class ProposalLayer(nn.Module):
             #    between prediction and ground truth labels.
             
             # Locate the sampled labels from class scores:
-            _keep      = Variable(_labels.view(-1).ne(-1).nonzero().view(-1))
+            _keep      = _labels.view(-1).ne(-1).nonzero().view(-1)
             keep_score = torch.index_select(cls_scores.view(-1, 2), 0, _keep)
             rpn_labels = torch.index_select(_labels.view(-1), 0, _keep.data)
-            rpn_labels = Variable(rpn_labels.long())
+            rpn_labels = rpn_labels.long()
             
             self.rpn_cls_loss = fcn.cross_entropy(keep_score, rpn_labels)
             
@@ -186,7 +177,7 @@ class ProposalLayer(nn.Module):
             out_weight = gt_boxes.new(_batchSize, anchors.size(1)).zero_()
             
             in_weight[_labels == 1]   = Config.RPN.L1WEIGHT_INTERSECTION
-            out_weight[_labels != -1] = 1.0/torch.sum(_labels[0] >= 0).float()
+            out_weight[_labels != -1] = (1.0/torch.sum(_labels[0] >= 0).float()).to(out_weight.dtype)
             
             # Reshape weights to match feature sizes:
             in_weight  = in_weight.view(_batchSize, anchors.size(1), 1)
@@ -265,10 +256,10 @@ class RPN(nn.Module):
         self.RPNRegressionLayer.weight.data.normal_(0,0.01)
         self.RPNRegressionLayer.bias.data.zero_()
         self.RPNClassificationLayer.weight.data.normal_(0,0.01)
-        self.RPNRegressionLayer.bias.data.zero_()
+        self.RPNClassificationLayer.bias.data.zero_()
     
     @staticmethod
-    def _reshape_tensor(tensor, new_shape):
+    def _reshape_(tensor, new_shape):
         _shape = tensor.size()
         tensor = tensor.view(_shape[0],
                              int(new_shape),
@@ -293,8 +284,8 @@ class RPN(nn.Module):
         # Using the convoluted features, derive classification and offset
         # regressions to bounding box predictions.
         _rpn_class_score = self.RPNClassificationLayer(_rpn_conv_map)
-        _rpn_class_prob  = self._reshape_tensor(fcn.softmax(
-                           self._reshape_tensor(_rpn_class_score, 2), dim=1), self.RPNClassificationLayer.out_channels)
+        _rpn_class_prob  = fcn.softmax(self._reshape_(_rpn_class_score,2), 1)
+        _rpn_class_prob  = self._reshape_(_rpn_class_prob, self.RPNClassificationLayer.out_channels)
         
         # offsets to anchors:
         _rpn_bbox_pred   = self.RPNRegressionLayer(_rpn_conv_map)

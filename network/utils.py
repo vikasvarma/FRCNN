@@ -106,10 +106,15 @@ def IoU(bboxes, anchors):
     _iou = torch.zeros((_b, _K, _N), dtype=bboxes.dtype)
     
     # Compute area of anchors and bboxes:
-    _anchorArea = ((anchors[:,:,2] - anchors[:,:,0]) * \
-                   (anchors[:,:,3] - anchors[:,:,1])).view(_b, _K, 1)
-    _bboxesArea = ((bboxes[:,:,2] - bboxes[:,:,0]) * \
-                   (bboxes[:,:,3] - bboxes[:,:,1])).view(_b, 1, _N)
+    _anchorW = (anchors[:,:,2] - anchors[:,:,0] + 1)
+    _anchorH = (anchors[:,:,3] - anchors[:,:,1] + 1)
+    _anchorA = (_anchorW * _anchorH).view(_b, _K, 1)
+    _anchor0 = ((_anchorW == 1) * (_anchorH == 1)).view(_b, _K, 1)
+    
+    _bboxesW = (bboxes[:,:,2] - bboxes[:,:,0] + 1)
+    _bboxesH = (bboxes[:,:,3] - bboxes[:,:,1] + 1)
+    _bboxesA = (_bboxesW * _bboxesH).view(_b, 1, _N)
+    _bboxes0 = ((_bboxesW == 1) * (_bboxesH == 1)).view(_b, 1, _N)
     
     # Expand anchors and bounding boes to match sizes:
     # NOTE: Use expand instead of repeat, expanding singleton dimensions
@@ -119,17 +124,22 @@ def IoU(bboxes, anchors):
         
     # Find intersection coordinates and compute area:
     # Size of intersection area: [b K N]
-    _iwidth   = torch.min(bboxes[:,:,:,2], anchors[:,:,:,2]) - \
-                torch.max(bboxes[:,:,:,0], anchors[:,:,:,0])
-    _iheight  = torch.min(bboxes[:,:,:,3], anchors[:,:,:,3]) - \
-                torch.max(bboxes[:,:,:,1], anchors[:,:,:,1])
+    _interW   = torch.min(bboxes[:,:,:,2], anchors[:,:,:,2]) - \
+                torch.max(bboxes[:,:,:,0], anchors[:,:,:,0]) + 1
+    _interH   = torch.min(bboxes[:,:,:,3], anchors[:,:,:,3]) - \
+                torch.max(bboxes[:,:,:,1], anchors[:,:,:,1]) + 1
         
     # NOTE: Not all bounding boxes intersect the anchor, so we trim the ones
     #       that don't to have 0 intersection area.
-    _iarea    = torch.clamp(_iwidth * _iheight, min=0)
-        
+    _interA = torch.clamp(_interW, min=0) * torch.clamp(_interH, min=0)
+    
     # Compute Intersection-Over-Union and return.
-    _iou      = _iarea / (_anchorArea + _bboxesArea - _iarea)
+    _iou      = _interA / (_anchorA + _bboxesA - _interA)
+    
+    # Clamp the overlap area for single pixel ROIs:
+    _iou.masked_fill_(_bboxes0.expand(_b, _K, _N),  0)
+    _iou.masked_fill_(_anchor0.expand(_b, _K, _N), -1)
+    
     return _iou
 
 #-------------------------------------------------------------------------------
@@ -183,7 +193,7 @@ def randsample(labels, numSamples, sampleRatio):
     _req_pos     = int(numSamples * sampleRatio)
     _numPositive = torch.sum((labels == 1).int(), 1)
     _numNegative = torch.sum((labels == 0).int(), 1)
-            
+    
     for _batch in range(labels.size(0)):
         # For each batch, randomly disable samples if their total exceeds whats
         # required to construct the sample.
@@ -202,12 +212,18 @@ def randsample(labels, numSamples, sampleRatio):
                                     [:_negind.size(0) - _req_neg]]
             labels[_batch, _disind] = -1
             
+        # If enough samples are not available, sample from the ignored labels:
+        total = torch.sum(labels[_batch].ne(-1))
+        if total < numSamples:
+            ignored = torch.nonzero(labels[_batch] == -1)
+            labels[_batch, ignored[range(numSamples - total)]] = 0
+            
     # Done, excess samples are assigned the ignore label.
     return labels
 
 
 #-------------------------------------------------------------------------------
-def nms(bboxes, scores):
+def nms(bboxes, scores, training=True):
     """
     Non-Maximum Supression (NMS): Supresses capturing ROIs which point to the same object. This is identified through the IoU between predicted targets.
         
@@ -217,10 +233,11 @@ def nms(bboxes, scores):
             scores - [b N] Tensor
                      Objectness scores of each bounding box
     """
-    assert(bboxes.size(1) == scores.size(1))
+    assert((bboxes.size(0) == scores.size(0)) & 
+           (bboxes.size(1) == scores.size(1)))
     
     # NMS Parameters:
-    if Config.TRAIN.TRAINING:
+    if training:
         pre_nms_N  = Config.RPN.PRE_TRAIN_NMS_N
         post_nms_N = Config.RPN.POST_TRAIN_NMS_N
     else:
@@ -229,20 +246,32 @@ def nms(bboxes, scores):
             
     nms_thr    = Config.RPN.NMS_THR
     _batchSize = bboxes.size(0)
-       
-    # Sort the scores and retain ones that are have the top N scores:
-    scores, _order = torch.sort(scores, dim=1, descending=True)
-    bboxes = bboxes[:, _order.view(-1), :]
+    
+    # Initialize the output bounding box set:
     boxset = bboxes.new(_batchSize, post_nms_N, 4).zero_()
-        
+    
+    # For each batch, apply the NMS threshold to get top N predictions:
     for _batch in range(_batchSize):
-        # For each batch, apply the NMS threshold on top N predictions:
-        _boxes = bboxes[_batch, :min(bboxes.size(1), pre_nms_N), :]
-        _score = scores[_batch, :min(scores.numel(), pre_nms_N)]
+        # Filter out proposals with either width or height less than minimum 
+        # size threshold.
+        boxw = bboxes[_batch,:,2] - bboxes[_batch,:,0] + 1
+        boxh = bboxes[_batch,:,3] - bboxes[_batch,:,1] + 1
+        min_size   = Config.RPN.MIN_BOX_SIZE
+        valid_size = torch.nonzero((boxw >= min_size) & (boxh >= min_size))
+        _boxes     = bboxes[_batch, valid_size, :].squeeze_()
+        _score     = scores[_batch, valid_size].squeeze_()
+        
+        # Sort the scores and retain ones that are have the top N scores:
+        _score, _order = torch.sort(_score, descending=True)
+        
+        # Sort batch boxes in descending order:
+        _boxes = _boxes[_order, :]
+        _boxes = _boxes[:min(_boxes.size(0), pre_nms_N), :]
+        _score = _score[:min(_score.size(0), pre_nms_N)]
         
         # NMS and select top N candidates:
-        _boxes = _boxes.view(-1, 4)[:, [1,0,3,2]]
-        _score = _score.view(-1).type(_boxes.dtype)
+        _boxes = _boxes[:, [1,0,3,2]]
+        _score = _score.type(_boxes.dtype)
         _keep  = torchvision.ops.nms(_boxes, _score, nms_thr)
         _keep  = _keep[:min(_keep.size(0), post_nms_N)]
             
@@ -265,7 +294,7 @@ def smoothL1Loss(predictions, groundTruth, inweights, outweights):
     assert(outweights.size()  == groundTruth.size())   
      
     # L1 Loss Paramters:
-    sigma = 6
+    sigma = 9
         
     difference = predictions - groundTruth
     in_diff    = torch.abs(inweights * difference)

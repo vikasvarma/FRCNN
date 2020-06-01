@@ -17,31 +17,35 @@ class Config:
 
     # Training Parameters ____________________________________________________________________________
     TRAIN         = True
-    NUM_WORKERS   = 8
+    NUM_WORKERS   = 0
     LEARNING_RATE = 0.001
     MOMENTUM      = 0.9
     WEIGHT_DECAY  = 0.0005
     GAMMA         = 0.1
+    LR_STEPSIZE   = 10000
+    MAX_EPOCH     = 20
+    DISPLAY_STEP  = 10
     
     # Faster R-CNN Parameters ____________________________________________________________________________
     class FRCNN:
-        FEATURE_SIZE      = [64, 3, 800, 800]
+        FEATURE_SIZE      = [4, 3, 256, 256]
         SPATIAL_SCALE     = VGG_SPATIAL_SCALE
         ADAPTIVEPOOL_SIZE = (7, 7)
         ROI_POSITIVE_THR  = (0.5, 1.0)
         ROI_NEGATIVE_THR  = (0.0, 0.5)
         ROI_SAMPLES       = 128
         ROI_SAMPLE_RATIO  = 0.25
+        MAX_GT_BOXES      = 20
     
     # RPN Parameters ____________________________________________________________________________
     class RPN:
         
         # Network Parameters ________________________________________________________________________
         FEATURE_DEPTH = 512
-        MIN_BOX_SIZE  = 16
+        MIN_BOX_SIZE  = 8
         
         # Anchor Parameters ________________________________________________________________________
-        ANCHOR_SCALES       = [8, 16, 32]
+        ANCHOR_SCALES       = [4, 8, 16]
         ANCHOR_RATIOS       = [0.5, 1, 2]
         SPATIAL_SCALE       = VGG_SPATIAL_SCALE
         ANCHOR_SAMPLES      = 256

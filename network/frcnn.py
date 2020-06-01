@@ -13,7 +13,7 @@ Module Information
 
 from   torch.autograd   import Variable
 from   torch            import nn
-from   config           import Config
+from   .config          import Config
 from   .rpn             import RPN
 from   .utils           import *
 from   torchvision.ops  import roi_pool
@@ -64,7 +64,7 @@ class ProposalTargetLayer(nn.Module):
         # wrt sampled batches.
         _argmax_gt   = _argmax_gt[_keep[0], _keep[1]]
         _argmax_gt   = _argmax_gt.view(_batchSize, _sample_size).contiguous()
-        gt_batch     = proposals.new(roi_batch.size()).zero_()
+        gt_batch     = roi_batch.new(roi_batch.size()).zero_()
         for _b in range(_batchSize):
             gt_batch[_b] = gt_boxes[_b, _argmax_gt[_b], :]
         
@@ -96,8 +96,15 @@ class FRCNN(nn.Module):
         # Extract the pretrained convolutional layers from a VGG-16 network
         # which will be used as the base feature extractor.
         vgg = torchvision.models.vgg16(pretrained=True)
-        self.VGG16FeatureExtractor  = nn.Sequential(*list(vgg.features)[:-1])
-        self.VGG16FeatureClassifier = nn.Sequential(*list(vgg.classifier)[:-1])
+        self.VGG16FeatureExtractor  = nn.Sequential(*list(vgg.features.\
+                                        _modules.values())[:-1])
+        self.VGG16FeatureClassifier = nn.Sequential(*list(vgg.classifier.\
+                                        _modules.values())[:-1])
+                
+        # Fix the first 10 layers of VGG, and don't train over them:
+        for module in range(10):
+            for param in self.VGG16FeatureExtractor[module].parameters(): 
+                param.requires_grad = False
         
         # Initialize the RPN network layer which provides region proposals from
         # computed convolutional features
@@ -131,7 +138,15 @@ class FRCNN(nn.Module):
         self.FRCNN_BBOX_LOSS  = 0
         
         assert(list(batch.size()) == Config.FRCNN.FEATURE_SIZE)
-        assert(batch.size(0) == gt_boxes.size(0))
+        
+        # Split bounding box coordinates and classes:
+        if self.training:
+            gt_classes = gt_boxes[:,:,4]
+            gt_boxes   = gt_boxes[:,:,:4]
+        
+        batch.requires_grad_()
+        gt_boxes.requires_grad_()
+        gt_classes.requires_grad_()
         
         # Get low-level feature map from the CNN. ________________________________________________________________________
         # NOTE: Since this is an adaptation of the Fast R-CNN network, these
@@ -146,15 +161,15 @@ class FRCNN(nn.Module):
         # If this is training, further refine the proposals through
         # ground-truth bounding boxes.
         _labels, bbox_targets = [None, None]
-        if Config.TRAIN.TRAINING:
+        if self.training:
             proposals, _labels, bbox_targets, bbox_inweights, bbox_outweights =\
                 self.PropTargetLayer(proposals, gt_boxes)
             
             # Convert these tensors to autograd variables:
-            _labels         = Variable(_labels)
-            bbox_targets    = Variable(bbox_targets)
-            bbox_inweights  = Variable(bbox_inweights)
-            bbox_outweights = Variable(bbox_outweights)
+            _labels         = _labels.to(proposals.dtype).requires_grad_()
+            bbox_targets    = bbox_targets.requires_grad_()
+            bbox_inweights  = bbox_inweights.requires_grad_()
+            bbox_outweights = bbox_outweights.requires_grad_()
         
         # Perform ROI Max Pooling to create feature sets of the same size for 
         # obtained proposals. ________________________________________________________________________
@@ -162,9 +177,9 @@ class FRCNN(nn.Module):
         # [k x1 y1 x2 y2] format as required by roi_pool.
         # poposals - [b N 4] tensor
         _b, _N, _ = proposals.size()
-        batchids  = torch.from_numpy(np.repeat(np.arange(_b), _N)).float()
-        batchids  = batchids.float().view(-1, 1)
-        rois      = Variable(torch.cat((batchids, proposals.view(-1,4)), dim=1))
+        batchids  = torch.from_numpy(np.repeat(np.arange(_b), _N))
+        batchids  = batchids.view(-1,1).to(proposals.device).to(proposals.dtype)
+        rois = torch.cat((batchids,proposals.view(-1,4)),dim=1).requires_grad_()
         
         # Pool the proposals from the batch:
         _featurePool = roi_pool(_featureMap, rois, 
@@ -184,7 +199,7 @@ class FRCNN(nn.Module):
         
         # For training workflows, compute use the computed targets and the
         # labels to compute total loss.
-        if Config.TRAIN.TRAINING:
+        if self.training:
             self.FRCNN_CLASS_LOSS = fcn.cross_entropy(bscores, 
                                                       _labels.view(-1).long())
 
@@ -193,7 +208,6 @@ class FRCNN(nn.Module):
                                                  bbox_targets, 
                                                  bbox_inweights,
                                                  bbox_outweights)
-
         
         # DONE: Return all variables required by the trainer to identify
         #       whether the weights have converged.

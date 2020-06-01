@@ -36,8 +36,8 @@ class STACCarribeanDataset(BigtiffDataset):
         self.GroundTruth = self.load_groundtruth(images)
         
         # Assign patch sizes to bigtiffs based on maximum ROI size:
-        patchSize = self.set_patchsize(images)
-        stride    = [int(p/2) for p in patchSize]
+        self.PatchSize = self.set_patchsize(images)
+        stride = [int(p/2) for p in self.PatchSize]
         
         # Sampling policy:
         sampleSet = self.createSamples(images, stride)
@@ -111,19 +111,25 @@ class STACCarribeanDataset(BigtiffDataset):
         """Collation function to be used with data loaders"""
         
         images   = []
-        roi_size = 6 if self.Train else 5
-        rois     = torch.empty((0,roi_size), dtype=batch[0][1].dtype)
+        roi_size = 5 if self.Train else 4
+        rois     = torch.zeros((len(batch), 20, roi_size), dtype=torch.float32)
+        rois     = rois.to(batch[0][1].device)
         
         for _b in range(len(batch)):
             # Accumulate patches:
-            images.append(batch[_b][0])
+            images.append(batch[_b][0].to(torch.float32))
             
             # Accumulate ROI:
+            """
             image_num = torch.Tensor([_b]).expand(batch[_b][1].size(0))
             image_num = image_num.type(batch[_b][1].dtype).view(-1,1)
+            image_num = image_num.to(batch[_b][1].device)
             _roi      = torch.cat([image_num, batch[_b][1]], dim=1)
             rois      = torch.cat([rois, _roi], dim=0)
-        
+            """
+            num_boxes   = batch[_b][1].size(0)
+            rois[_b,:num_boxes,:] = batch[_b][1]
+            
         # Stack outputs and return
         batch = [torch.stack(images, dim=0), rois]
         return batch
@@ -286,16 +292,12 @@ class STACCarribeanDataset(BigtiffDataset):
         return count
     
     # --------------------------------------------------------------------------
-    def balance_classes(self, classids, seed=0):
+    def balance_classes(self, classids):
         """Balance ROI instances across the dataset
         
             Arguments:
                 ClassIDs - Define the set of classes that should be considered while sample balancing. Helps ignore labels that are inconsequential.
         """
-        
-        # Seed RNG while performing class balancing to get reproducible results:
-        rng_state = np.random.get_state()
-        np.random.seed(seed)
         
         # Get ROI class counts for each sample patch:
         samples    = self.SampleID
@@ -347,9 +349,17 @@ class STACCarribeanDataset(BigtiffDataset):
         # Done, balanced, update samples:
         self.SampleID = samples
         self.Samples  = self.Samples[samples,:]
+
+    # --------------------------------------------------------------------------
+    def get_max_rois(self):
+        """Find the maximum number of ROIs per batch sample in the dataset"""
         
-        # Reset RNG state:
-        np.random.set_state(rng_state)
+        maxsize = 0
+        for index in self.SampleID:
+            rois = self.__getrois__(index);
+            maxsize = max(maxsize, rois.shape[0])
+        
+        return maxsize
 # ______________________________________________________________________________
 
 

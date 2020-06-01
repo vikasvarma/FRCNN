@@ -1,8 +1,45 @@
 import numpy as np
 import torch
-from torchvision.transforms import ColorJitter
+from torchvision.transforms import ColorJitter, Resize, Normalize
 from PIL import Image
 
+# ------------------------------------------------------------------------------
+#   Image Resize
+# ------------------------------------------------------------------------------
+class ImageResize(object):
+    """Resize image and targets to specified size.
+    """
+
+    # --------------------------------------------------------------------------
+    def __init__(self, output_size):
+        assert isinstance(output_size, (int, tuple))
+        if isinstance(output_size, int):
+            self.output_size = (output_size, output_size)
+        else:
+            assert len(output_size) == 2
+            self.output_size = output_size
+            
+        self.tform = Resize(self.output_size)
+
+    # --------------------------------------------------------------------------
+    def __call__(self, inputs):
+        """
+        Random contextual image crop to desired image size.
+        """
+        image = inputs['image']
+        H, W  = image.shape[:2]
+        rois  = inputs['ROI']
+        image = self.tform.__call__(Image.fromarray(image))
+        image = np.array(image)
+        
+        # Resize ROIs:
+        scale = self.output_size / np.array([H,W], dtype=np.float)
+        scale = np.tile(scale, 2)
+        rois[:,:4] = scale * rois[:,:4]
+        rois = np.round(rois)
+
+        return {'image': image, 'ROI': rois}
+    
 # ------------------------------------------------------------------------------
 #   Randomized Image Crop
 # ------------------------------------------------------------------------------
@@ -10,8 +47,7 @@ class RandomCrop(object):
     """Crop randomly the image in a sample.
 
     Args:
-        output_size (tuple or int): Desired output size. If int, square crop
-            is made.
+        border_size (tuple or int): Desired crop border size. If int, square crop is made.
     """
 
     # --------------------------------------------------------------------------
@@ -35,16 +71,16 @@ class RandomCrop(object):
         # Contextual aware crop: Crop to maximally retain ROIs.
         #   Identify the region containing the ROIs and crop outside this 
         #   region.
-        roi_top  = np.amin(rois[:,:2], axis=0)
-        roi_left = np.amax(rois[:,2:], axis=0)
+        roi_top  = np.amin(rois[:,0:2], axis=0)
+        roi_left = np.amax(rois[:,2:4], axis=0)
         
         region = np.zeros(4, dtype=int)
         
         # Sample row indices:
         if H - roi_left[0] < roi_top[0] + 1:
             # ROIs closer to the lower edge. Sample the y2 region location.
-            regend    = min(max(roi_left[0], self.output_size[0])+1, H-2)
-            region[2] = np.random.randint(regend, H-1)
+            regend    = min(max(roi_left[0], self.output_size[0])+1, H-1)
+            region[2] = np.random.randint(regend, H)
             region[0] = region[2] - self.output_size[0] + 1
         else:
             # ROIs closer to the upper edge. Sample the y1 region location.
@@ -55,8 +91,8 @@ class RandomCrop(object):
         # Sample col indices:
         if W - roi_left[1] < roi_top[1] + 1:
             # ROIs closer to the right edge. Sample the x2 region location.
-            regend    = min(max(roi_left[1], self.output_size[1])+1, W-2)
-            region[3] = np.random.randint(regend, W-1)
+            regend    = min(max(roi_left[1], self.output_size[1])+1, W-1)
+            region[3] = np.random.randint(regend, W)
             region[1] = region[3] - self.output_size[1] + 1
         else:
             # ROIs closer to the left edge. Sample the x1 region location.
@@ -166,6 +202,29 @@ class ToTensor(object):
         image  = image.permute((2, 0, 1))
         rois   = inputs['ROI']
         rois   = torch.from_numpy(rois).to(self.device)
+        
+        return {'image': image, 'ROI': rois}
+#_______________________________________________________________________________
+
+# ------------------------------------------------------------------------------
+#   Normalize image to unit normal intensities
+# ------------------------------------------------------------------------------
+class NormalizeIntensity(object):
+    """Convert ndarrays in sample to Tensors."""
+    
+    # --------------------------------------------------------------------------
+    def __init__(self, mean, std, device='cpu'):
+        self.device = device
+        self.Mean   = mean
+        self.Std    = std
+
+    # --------------------------------------------------------------------------
+    def __call__(self, inputs):
+        # Normalize to zero-mean normal intensities:
+        image = inputs['image'].float()
+        rois  = inputs['ROI']
+        for n in range(image.size(0)):
+            image[n,:,:] = (image[n,:,:] - self.Mean) / self.Std
         
         return {'image': image, 'ROI': rois}
 #_______________________________________________________________________________
