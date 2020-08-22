@@ -50,6 +50,10 @@ class STACCarribeanDataset(BigtiffDataset):
         self.SampleID = np.arange(self.Samples.shape[0])
     
     # --------------------------------------------------------------------------
+    def get_classes(self):
+        return self._classes
+        
+    # --------------------------------------------------------------------------
     def __getitem__(self, index):
         # Overloading super class method to only return the first 3 (RGB) 
         # channels of the patch.

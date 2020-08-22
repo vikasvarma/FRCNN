@@ -37,7 +37,7 @@ class ImageResize(object):
         scale = np.tile(scale, 2)
         rois[:,:4] = scale * rois[:,:4]
         rois = np.round(rois)
-
+        
         return {'image': image, 'ROI': rois}
     
 # ------------------------------------------------------------------------------
@@ -213,8 +213,7 @@ class NormalizeIntensity(object):
     """Convert ndarrays in sample to Tensors."""
     
     # --------------------------------------------------------------------------
-    def __init__(self, mean, std, device='cpu'):
-        self.device = device
+    def __init__(self, mean, std):
         self.Mean   = mean
         self.Std    = std
 

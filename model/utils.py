@@ -5,7 +5,7 @@
 import numpy as np
 import torch
 import torchvision
-from .config import Config
+from config import Config
 
 #-------------------------------------------------------------------------------
 def centrehw(roi):
@@ -46,36 +46,42 @@ def yxcord(roi):
     return _yx_roi
 
 #-------------------------------------------------------------------------------
-def targets(bbox, anchor):
+def box2targets(bbox, anchor):
     """
-        Computes parameterized target coefficients wrt anchors. Assumes that the anchors supplied are in [ctry, ctrx, h, w] format.
+        Computes parameterized target coefficients wrt anchors. Assumes that the anchors supplied are in [y1, x1, y2, x2] format.
     """
     
+    ctrhwbox  = centrehw(bbox)
+    ctrhwanch = centrehw(anchor)
+    
     # Calculate target coefficients:
-    _dy = (bbox[:,:,0] - anchor[:,:,0]) / anchor[:,:,2]
-    _dx = (bbox[:,:,1] - anchor[:,:,1]) / anchor[:,:,3]
-    _dh = torch.log(bbox[:,:,2] / anchor[:,:,2])
-    _dw = torch.log(bbox[:,:,3] / anchor[:,:,3])
+    _dy = (ctrhwbox[:,:,0] - ctrhwanch[:,:,0]) / ctrhwanch[:,:,2]
+    _dx = (ctrhwbox[:,:,1] - ctrhwanch[:,:,1]) / ctrhwanch[:,:,3]
+    _dh = torch.log(ctrhwbox[:,:,2] / ctrhwanch[:,:,2])
+    _dw = torch.log(ctrhwbox[:,:,3] / ctrhwanch[:,:,3])
         
     _coeff = torch.stack((_dy, _dx, _dh, _dw), dim=2)
         
     return _coeff
 
 #-------------------------------------------------------------------------------
-def invtargets(target, anchor):
+def targets2box(target, anchor):
     """
         Transform target coefficients computed wrt anchors to bounding boxes. Assumes that the anchors supplied are in [ctry, ctrx, h, w] format.
     """
     
     assert(target.size() == anchor.size())
     
-    # Calculate bounding boxes from targets:
-    _ctry = (target[:,:,0] * anchor[:,:,2]) + anchor[:,:,0]
-    _ctrx = (target[:,:,1] * anchor[:,:,3]) + anchor[:,:,1]
-    _h    = anchor[:,:,2] * torch.exp(target[:,:,2])
-    _w    = anchor[:,:,3] * torch.exp(target[:,:,3])
+    ctrhwAnchor = centrehw(anchor)
     
-    _bbox = torch.stack((_ctry, _ctrx, _h, _w), dim=2)
+    # Calculate bounding boxes from targets:
+    _ctry = (target[:,:,0] * ctrhwAnchor[:,:,2]) + ctrhwAnchor[:,:,0]
+    _ctrx = (target[:,:,1] * ctrhwAnchor[:,:,3]) + ctrhwAnchor[:,:,1]
+    _h    = ctrhwAnchor[:,:,2] * torch.exp(target[:,:,2])
+    _w    = ctrhwAnchor[:,:,3] * torch.exp(target[:,:,3])
+    
+    ctrhw_bbox = torch.stack((_ctry, _ctrx, _h, _w), dim=2)
+    _bbox      = yxcord(ctrhw_bbox)
     
     return _bbox
     
@@ -94,7 +100,7 @@ def IoU(bboxes, anchors):
     """
     
     if anchors.dim() == 2:
-        anchors = anchors.expand(_b, anchors.size(0), 4).contiguous()
+        anchors = anchors.expand(bboxes.size(0),anchors.size(0),4).contiguous()
         
     assert(anchors.dim() == bboxes.dim())
     
@@ -134,7 +140,7 @@ def IoU(bboxes, anchors):
     _interA = torch.clamp(_interW, min=0) * torch.clamp(_interH, min=0)
     
     # Compute Intersection-Over-Union and return.
-    _iou      = _interA / (_anchorA + _bboxesA - _interA)
+    _iou    = _interA / (_anchorA + _bboxesA - _interA)
     
     # Clamp the overlap area for single pixel ROIs:
     _iou.masked_fill_(_bboxes0.expand(_b, _K, _N),  0)
@@ -156,7 +162,7 @@ def classify(iou, posthr, negthr):
     _b, _K, _N           = iou.size()
     _max_iou, argmax_gt  = torch.max(iou, dim=2)    # Which GT has max overlap
     argmax_bbox          = torch.argmax(iou, dim=1) # Which bbox has max overlap
-       
+    
     # Initialize the label matrix with zeros (neutral label). Anchors
     # labeled -1 at the end of labeling are ignored and not considered for
     # training.
@@ -170,15 +176,13 @@ def classify(iou, posthr, negthr):
     # CASE (b): The anchors with the IoU overlap higher than the positive
     #           threshold (default = 0.7) with any ground-truth bounding
     #           box are assigned positively.
-    pos_ind = torch.nonzero((_max_iou <= posthr[1]) &
-                            (_max_iou >= posthr[0]), as_tuple=True)
+    pos_ind = torch.nonzero(_max_iou >= posthr, as_tuple=True)
     labels[pos_ind[0], pos_ind[1]] = 1
         
     # CASE (c): The anchors whose maximum IoU overlap remains lower than the
     #           negative class threshold (default = 0.3) are assigned a 
     #           negative class label.
-    neg_ind = torch.nonzero((_max_iou <  negthr[1]) &
-                            (_max_iou >= negthr[0]), as_tuple=True)
+    neg_ind = torch.nonzero(_max_iou <  negthr, as_tuple=True)
     labels[neg_ind[0], neg_ind[1]] = 0
     
     return labels, argmax_gt
@@ -223,7 +227,7 @@ def randsample(labels, numSamples, sampleRatio):
 
 
 #-------------------------------------------------------------------------------
-def nms(bboxes, scores, training=True):
+def nms(bboxes, scores, n_pre, n_post):
     """
     Non-Maximum Supression (NMS): Supresses capturing ROIs which point to the same object. This is identified through the IoU between predicted targets.
         
@@ -237,50 +241,47 @@ def nms(bboxes, scores, training=True):
            (bboxes.size(1) == scores.size(1)))
     
     # NMS Parameters:
-    if training:
-        pre_nms_N  = Config.RPN.PRE_TRAIN_NMS_N
-        post_nms_N = Config.RPN.POST_TRAIN_NMS_N
-    else:
-        pre_nms_N  = Config.RPN.PRE_TEST_NMS_N
-        post_nms_N = Config.RPN.POST_TEST_NMS_N
-            
-    nms_thr    = Config.RPN.NMS_THR
-    _batchSize = bboxes.size(0)
+    nms_thr = Config.NMS_THR
+    B = bboxes.size(0)
     
     # Initialize the output bounding box set:
-    boxset = bboxes.new(_batchSize, post_nms_N, 4).zero_()
+    boxset = bboxes.new(torch.Size([B, n_post, 4])).zero_()
     
     # For each batch, apply the NMS threshold to get top N predictions:
-    for _batch in range(_batchSize):
+    for _b in range(B):
         # Filter out proposals with either width or height less than minimum 
         # size threshold.
-        boxw = bboxes[_batch,:,2] - bboxes[_batch,:,0] + 1
-        boxh = bboxes[_batch,:,3] - bboxes[_batch,:,1] + 1
-        min_size   = Config.RPN.MIN_BOX_SIZE
+        boxw = bboxes[_b,:,2] - bboxes[_b,:,0] + 1
+        boxh = bboxes[_b,:,3] - bboxes[_b,:,1] + 1
+        min_size   = Config.MIN_BOX_SIZE
         valid_size = torch.nonzero((boxw >= min_size) & (boxh >= min_size))
-        _boxes     = bboxes[_batch, valid_size, :].squeeze_()
-        _score     = scores[_batch, valid_size].squeeze_()
+        _boxes     = bboxes[_b, valid_size, :].squeeze_()
+        _score     = scores[_b, valid_size].squeeze_()
         
         # Sort the scores and retain ones that are have the top N scores:
         _score, _order = torch.sort(_score, descending=True)
         
         # Sort batch boxes in descending order:
         _boxes = _boxes[_order, :]
-        _boxes = _boxes[:min(_boxes.size(0), pre_nms_N), :]
-        _score = _score[:min(_score.size(0), pre_nms_N)]
+        
+        # Select the top performing N_PRE boxes:
+        _boxes = _boxes[:min(_boxes.size(0), n_pre), :]
+        _score = _score[:min(_score.size(0), n_pre)]
         
         # NMS and select top N candidates:
         _boxes = _boxes[:, [1,0,3,2]]
         _score = _score.type(_boxes.dtype)
         _keep  = torchvision.ops.nms(_boxes, _score, nms_thr)
-        _keep  = _keep[:min(_keep.size(0), post_nms_N)]
-            
-        boxset[_batch, :_keep.numel(), :] = _boxes[_keep, :] 
+        _keep  = _keep[:min(_keep.size(0), n_post)]
+        
+        # Flip boxes from XY -> YX coordinates and store in the boxset:
+        keep_boxes = _boxes[_keep]
+        boxset[_b, :_keep.numel(), :] = keep_boxes[:, [1,0,3,2]]
     
     return boxset
 
 #-------------------------------------------------------------------------------
-def smoothL1Loss(predictions, groundTruth, inweights, outweights):
+def smoothL1Loss(predictions, groundTruth, weights, sigma):
     """
     Smooth L1 Loss Function: Used to compute the regression loss in  predicted and ground truth targets.
         
@@ -290,23 +291,12 @@ def smoothL1Loss(predictions, groundTruth, inweights, outweights):
     """
     
     assert(predictions.size() == groundTruth.size())
-    assert(inweights.size()   == groundTruth.size())
-    assert(outweights.size()  == groundTruth.size())   
-     
-    # L1 Loss Paramters:
-    sigma = 9
-        
-    difference = predictions - groundTruth
-    in_diff    = torch.abs(inweights * difference)
-    smoothL1   = (in_diff < 1. / sigma).detach().float()
-    in_loss    = torch.pow(in_diff,2) * (sigma / 2.0) * smoothL1 + \
-                 (in_diff - (0.5 / sigma)) * (1. - smoothL1)
-    loss       = outweights * in_loss
-        
-    # Find the total loss as an average across all dimensions:
-    for _d in sorted(range(loss.dim()), reverse=True):
-        loss = loss.sum(dim=_d)
+    assert(weights.size()     == groundTruth.size())   
     
-    loss = loss.mean()
-            
-    return loss
+    sigma = sigma ** 2
+    diff  = weights * (predictions - groundTruth)
+    flag  = (diff.abs().data < (1. / sigma)).float()
+    loss  = (flag * (sigma / 2.) * (diff ** 2) +
+            (1 - flag) * (diff.abs() - 0.5 / sigma))
+    
+    return loss.sum()

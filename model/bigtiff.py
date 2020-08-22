@@ -503,6 +503,11 @@ class BigtiffDataset(torch.utils.data.Dataset, ABC):
     
     # --------------------------------------------------------------------------
     @abstractmethod
+    def get_classes(self):
+        raise NotImplementedError('Abstract method get_classes is not implemented.')
+    
+    # --------------------------------------------------------------------------
+    @abstractmethod
     def __getrois__(self, index):
         raise NotImplementedError('Abstract method __getlabels__ is not implemented.')
     
