@@ -14,8 +14,9 @@ class STACCarribeanDataset(BigtiffDataset):
     _root   = r".\openai-challenge\data"
     _config = {
         "colombia" : ["borde_rural", "borde_soacha"],
-        "guatemala": ["mixco_1_and_ebenezer", "mixco3"],
-        "st_lucia" : ["casteries", "dennery", "gros_islet"]
+        "guatemala": ["mixco_1_and_ebenezer", "mixco_3"],
+        # "st_lucia" : ["casteries", "dennery", "gros_islet"]
+        "st_lucia" : ["dennery"]
     }
     _classes = ["concrete_cement", 
                 "healthy_metal",
@@ -44,10 +45,8 @@ class STACCarribeanDataset(BigtiffDataset):
         super(STACCarribeanDataset, self).__init__(images, samples=sampleSet)
         
         # Filter samples to the ones that only contain ROIs:
-        self.filterSamples()
-            
-        # Store Sample Indices as an array to allow for parallel processing:
-        self.SampleID = np.arange(self.Samples.shape[0])
+        sampleSet = self.filterSamples(sampleSet)
+        self._set_sampling_scheme_(sampleSet)
     
     # --------------------------------------------------------------------------
     def get_classes(self):
@@ -146,24 +145,27 @@ class STACCarribeanDataset(BigtiffDataset):
         
         # Create BigTiff objects for dataset images:
         images = {}
-        for region in self._config[self.Name]:
-            reg_dir = os.path.join(self._root, self.Name, region)
-            imgfile = os.path.join(reg_dir, '{0}_ortho-cog.tif'.format(region))
-            btif = Bigtiff(imgfile)
-            
-            # Load extents in world coordinates and setup the spatial maps:
-            meta_json = os.path.join(reg_dir, '{0}-imagery.json'.format(region))
-            with open(meta_json, 'r') as fid:
-                _meta = fid.read()
-            metadata = json.loads(_meta)
-            _xmin, _ymin, _xmax, _ymax = metadata['bbox']
-            
-            # Create spatial mapping for each image level:
-            refmaps = [SpatialMap(imsize, [_xmin, _xmax], [_ymin, _ymax]) 
-                            for imsize in btif.ImageSize]
-            btif.setSpatialMap(refmaps)
-            
-            images[region] = btif
+        for dataset in self.Name:
+            for region in self._config[dataset]:
+                reg_dir = os.path.join(self._root, dataset, region)
+                imgfile = '{0}_ortho-cog.tif'.format(region)
+                imgfile = os.path.join(reg_dir, imgfile)
+                btif = Bigtiff(imgfile)
+                
+                # Load extents in world coordinates and setup the spatial maps:
+                meta_json = '{0}-imagery.json'.format(region)
+                meta_json = os.path.join(reg_dir, meta_json)
+                with open(meta_json, 'r') as fid:
+                    _meta = fid.read()
+                metadata = json.loads(_meta)
+                _xmin, _ymin, _xmax, _ymax = metadata['bbox']
+                
+                # Create spatial mapping for each image level:
+                refmaps = [SpatialMap(imsize, [_xmin, _xmax], [_ymin, _ymax]) 
+                                for imsize in btif.ImageSize]
+                btif.setSpatialMap(refmaps)
+                
+                images[region] = btif
         
         return images
     
@@ -174,80 +176,79 @@ class STACCarribeanDataset(BigtiffDataset):
         """
         groundtruth = {}
         
-        for region in self._config[self.Name]:
-            # Identify the JSON file that holds ground truth:
-            reg_dir = os.path.join(self._root, self.Name, region)
-            if self.Train:
-                _json = os.path.join(reg_dir,'train-{0}.geojson'.format(region))
-            else:
-                _json = os.path.join(reg_dir,'test-{0}.geojson'.format(region))
-            
-            # Decode the JSON:
-            with open(_json, 'r') as fid:
-                json_data = fid.read()
-            _jsonDict = json.loads(json_data)
-            features  = _jsonDict["features"]
-            
-            # Concatenate all features:
-            roi_size  = (len(features), 5) if self.Train else (len(features), 4)
-            rois      = np.zeros(roi_size, dtype=np.float)
-            roi_ids   = []
-            
-            for n, roi in enumerate(features):
-                roi_id        = roi['id']
-                coordinates   = np.array(roi['geometry']['coordinates'])
-                
-                if len(coordinates.shape) != 3:
-                    # NOTE: Some data points have ROI coodinates provided as
-                    #       two disjoint sets of ROI. For this flatten the list
-                    #       before creating the array.
-                    # coord = np.empty((0,2), dtype=np.float)
-                    # for _c in coordinates:
-                    #     coord = np.append(coord, np.array(_c[0]), axis=0)
-                    coordinates = coordinates[0][0]
-
-                # coordinates = torch.from_numpy (coordinates).to(roi_label.device)
-                coordinates = np.reshape(coordinates, (-1,2))
-                
-                # NOTE: Some ROIs are polygonal due to the shape of the roof 
-                #       not being quadrilateral, these data points are 
-                #       aggregated to an enclosing quadrilateral as the network 
-                #       is only capable of detecting bounding boxes.
-                _top_left  = np.amin(coordinates, axis=0)
-                _bot_right = np.amax(coordinates, axis=0)
-                
-                # Append the roi label info:
-                bbox = np.append(_top_left, _bot_right)
+        for dataset in self.Name:
+            for region in self._config[dataset]:
+                # Identify the JSON file that holds ground truth:
                 if self.Train:
-                    roof_material = roi['properties']['roof_material']
-                    cls_label     = np.array(self._classes.index(roof_material))
-                    bbox          = np.append(bbox, cls_label)
-                
-                rois[n,:]  = bbox
-                roi_ids   += [roi_id]
+                    _json = 'train-{0}.geojson'.format(region)
+                else:
+                    _json = 'test-{0}.geojson'.format(region)
 
-            # Rearrange the labels into [y1 x2 y2 x2] format:
-            if self.Train:
-                rois = rois[:,[1,0,3,2,4]]
-            else:
-                rois = rois[:,[1,0,3,2]]
-            
-            # Convert the ROI coordinates from latitude and longitude 
-            # coordinates to image row-col.
-            btif   = images[region]
-            refmap = btif.SpatialMapping[btif.DirectoryID]
-            
-            # Correct Y coordinate notation and set the origin to top-left:
-            # NOTE: Doing this will flip the ymin and ymax coordinates as they 
-            #       would now correspond to opposite corners.
-            rois[:,[2,0]] = refmap.YLimits[1] - \
-                                 (rois[:,[0,2]] - refmap.YLimits[0])
-            
-            rois[:,[0,1]] = refmap.spatial2Image(rois[:,[1,0]])
-            rois[:,[2,3]] = refmap.spatial2Image(rois[:,[3,2]])
-            
-            # Add to dictionary:
-            groundtruth[region] = {"ID": roi_ids, "ROI": rois}
+                reg_dir = os.path.join(self._root, dataset, region)
+                _json = os.path.join(reg_dir, _json)
+                
+                # Decode the JSON:
+                with open(_json, 'r') as fid:
+                    json_data = fid.read()
+                _jsonDict = json.loads(json_data)
+                features  = _jsonDict["features"]
+                
+                # Concatenate all features:
+                roi_sz  = (len(features),5) if self.Train else (len(features),4)
+                rois    = np.zeros(roi_sz, dtype=np.float)
+                roi_ids = []
+                
+                for n, roi in enumerate(features):
+                    roi_id        = roi['id']
+                    coordinates   = np.array(roi['geometry']['coordinates'])
+                    
+                    if len(coordinates.shape) != 3:
+                        # NOTE: Some data points have ROI coodinates provided as
+                        #       two disjoint sets of ROI. For this flatten the 
+                        #       list before creating the array.
+                        coordinates = coordinates[0][0]
+
+                    coordinates = np.reshape(coordinates, (-1,2))
+                    
+                    # NOTE: Some ROIs are polygonal due to the shape of the 
+                    #       roof not being quadrilateral, these data points are 
+                    #       aggregated to an enclosing quadrilateral as the 
+                    #       network is only capable of detecting bounding boxes.
+                    _top_left  = np.amin(coordinates, axis=0)
+                    _bot_right = np.amax(coordinates, axis=0)
+                    
+                    # Append the roi label info:
+                    bbox = np.append(_top_left, _bot_right)
+                    if self.Train:
+                        material  = roi['properties']['roof_material']
+                        cls_label = np.array(self._classes.index(material))
+                        bbox      = np.append(bbox, cls_label)
+                    
+                    rois[n,:]  = bbox
+                    roi_ids   += [roi_id]
+
+                # Rearrange the labels into [y1 x2 y2 x2] format:
+                if self.Train:
+                    rois = rois[:,[1,0,3,2,4]]
+                else:
+                    rois = rois[:,[1,0,3,2]]
+                
+                # Convert the ROI coordinates from latitude and longitude 
+                # coordinates to image row-col.
+                btif   = images[region]
+                refmap = btif.SpatialMapping[btif.DirectoryID]
+                
+                # Correct Y coordinate notation and set the origin to top-left:
+                # NOTE: Doing this will flip the ymin and ymax coordinates as they 
+                #       would now correspond to opposite corners.
+                rois[:,[2,0]] = refmap.YLimits[1] - \
+                                    (rois[:,[0,2]] - refmap.YLimits[0])
+                
+                rois[:,[0,1]] = refmap.spatial2Image(rois[:,[1,0]])
+                rois[:,[2,3]] = refmap.spatial2Image(rois[:,[3,2]])
+                
+                # Add to dictionary:
+                groundtruth[region] = {"ID": roi_ids, "ROI": rois}
         
         return groundtruth
     
@@ -351,8 +352,8 @@ class STACCarribeanDataset(BigtiffDataset):
             class_ratio = totalcount[c_min] / totalcount[c_max]
             
         # Done, balanced, update samples:
-        self.SampleID = samples
-        self.Samples  = self.Samples[samples,:]
+        balancedset   = self.Samples[samples,:]
+        self._set_sampling_scheme_(balancedset)
 
     # --------------------------------------------------------------------------
     def get_max_rois(self):

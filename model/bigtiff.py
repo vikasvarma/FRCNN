@@ -488,18 +488,22 @@ class BigtiffDataset(torch.utils.data.Dataset, ABC):
         return _samples
     
     # --------------------------------------------------------------------------
-    def filterSamples(self):
+    def filterSamples(self, samples):
         """ Retains samples which have ROIs inside them."""
-        retain = np.array([False]).repeat(self.Samples.shape[0])
-        for sampleid in range(self.Samples.shape[0]):
+        retain = np.array([False]).repeat(samples.shape[0])
+        for sampleid in range(samples.shape[0]):
             rois = self.__getrois__(sampleid)
             retain[sampleid] = rois.size != 0
         
-        self.Samples = self.Samples[retain, :]
+        samples = samples[retain, :]
+        
+        return samples
     
     # --------------------------------------------------------------------------
-    def define_samples(self, sampling_policy):
-        self.Samples = sampling_policy
+    def _set_sampling_scheme_(self, sampleset):
+        # NOTE: Assign Sample Indices (row id) for parallel processing.
+        self.Samples  = sampleset
+        self.SampleID = np.arange(sampleset.shape[0])
     
     # --------------------------------------------------------------------------
     @abstractmethod

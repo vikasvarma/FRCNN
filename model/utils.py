@@ -46,19 +46,19 @@ def yxcord(roi):
     return _yx_roi
 
 #-------------------------------------------------------------------------------
-def box2targets(bbox, anchor):
+def box2targets(source, dest):
     """
-        Computes parameterized target coefficients wrt anchors. Assumes that the anchors supplied are in [y1, x1, y2, x2] format.
+        Computes parameterized coefficients between bounding boxes and targets. Assumes that bbox1 & bbox2 (target) are in [y1, x1, y2, x2] format.
     """
     
-    ctrhwbox  = centrehw(bbox)
-    ctrhwanch = centrehw(anchor)
+    ctrhwsrc = centrehw(source)
+    ctrhwdst = centrehw(dest)
     
     # Calculate target coefficients:
-    _dy = (ctrhwbox[:,:,0] - ctrhwanch[:,:,0]) / ctrhwanch[:,:,2]
-    _dx = (ctrhwbox[:,:,1] - ctrhwanch[:,:,1]) / ctrhwanch[:,:,3]
-    _dh = torch.log(ctrhwbox[:,:,2] / ctrhwanch[:,:,2])
-    _dw = torch.log(ctrhwbox[:,:,3] / ctrhwanch[:,:,3])
+    _dy = (ctrhwdst[:,:,0] - ctrhwsrc[:,:,0]) / ctrhwsrc[:,:,2]
+    _dx = (ctrhwdst[:,:,1] - ctrhwsrc[:,:,1]) / ctrhwsrc[:,:,3]
+    _dh = torch.log(ctrhwdst[:,:,2] / ctrhwsrc[:,:,2])
+    _dw = torch.log(ctrhwdst[:,:,3] / ctrhwsrc[:,:,3])
         
     _coeff = torch.stack((_dy, _dx, _dh, _dw), dim=2)
         

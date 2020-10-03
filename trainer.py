@@ -18,6 +18,7 @@ from model.frcnn      import FRCNN
 from torch.utils      import tensorboard
 from config           import Config
 from collections      import namedtuple
+from utils            import batchplot
 
 #-------------------------------------------------------------------------------
 #   Class definition macro for modules with no back-propagation gradient 
@@ -83,7 +84,7 @@ class AnchorTargetGenerator(object):
             boxes[b] = gt_bbox[b, argmax_bbox[b], :]
         
         # Map computed targets to only contain inside boxes:
-        targets = box2targets(boxes, anchors)
+        targets = box2targets(anchors, boxes)
         gt_anchor_targets = gt_bbox.new(anchors.size()).zero_()
         gt_anchor_targets[:, inside, :] = targets[:, inside, :]
         
@@ -134,7 +135,7 @@ class ProposalTargetGenerator(object):
         for b in range(B):
             # NOTE: Offset the labels to account for 0 labeled background.
             gt_ind = argmax_bbox[b]
-            labels = gt_label[b, gt_ind[keep[b]]] + 1
+            labels = gt_label[b, gt_ind[keep[b]]]
             sample_rois[b]  = proposals[b, keep[b], :]
             gt_roi_label[b] = labels
             gt_assigned[b]  = gt_bbox[b, gt_ind[keep[b]]]
@@ -142,7 +143,14 @@ class ProposalTargetGenerator(object):
         # Compute sampled ROI targets wrt ground truth:
         gt_roi_targets = box2targets(sample_rois, gt_assigned)
         
-        return sample_rois, gt_roi_targets, gt_roi_label
+        # Offset ROI lagels from [0 L-1] to [1 L] to allow for 0 to be 
+        # background class label.
+        gt_roi_label = gt_roi_label + 1
+        
+        # NOTE: TO REMOVE
+        sample_label = proposal_label[keep].view([B,S])
+        
+        return sample_rois, gt_roi_targets, gt_roi_label, sample_label
 #_______________________________________________________________________________
 
 #-------------------------------------------------------------------------------
@@ -176,7 +184,7 @@ class FRCNNTrainer(nn.Module):
         # Setup a learning rate scheduler:
         self.lr_scheduler = optim.lr_scheduler.StepLR(
             self.optimizer, 
-            step_size = int(Config.LR_STEPSIZE * dataset.__len__()),
+            step_size = Config.LR_STEPSIZE,
             gamma = Config.GAMMA
         )
         
@@ -272,7 +280,7 @@ class FRCNNTrainer(nn.Module):
         proposals, rpn_score, rpn_targets = self.network.RPN(features)
 
         # Sample proposals and find ground truth targets:
-        sample_proposals, gt_bbox_targets, gt_bbox_label =         ProposalTargetGenerator.__call__(
+        sample_proposals, gt_bbox_targets, gt_bbox_label, sample_label=         ProposalTargetGenerator.__call__(
             proposals,
             gt_bbox,
             gt_label
@@ -333,15 +341,15 @@ class FRCNNTrainer(nn.Module):
         self.boxes.data  = roi_locs.data
         self.labels.data = roi_label.data
         
-        # Clear network gradients:
-        self.network.zero_grad()
+        # Clear previous step gradients:
         self.optimizer.zero_grad()
         
         loss = self.forward(self.batch, self.boxes, self.labels)
         loss.total_loss.backward()
         
         self.optimizer.step()
-        self.lr_scheduler.step()
+        if epoch > 0 & step == 0 & epoch % Config.LR_STEPSIZE == 0:
+            self.lr_scheduler.step()
         
         if step % Config.DISPLAY_STEP == 0:
             self.log_results(epoch, step, loss)
@@ -373,7 +381,7 @@ class FRCNNTrainer(nn.Module):
         self.logger.add_scalar("LOSS/TRAIN/RCNN_BBox_Loss" , rcnn_box_loss, N)
     
     #---------------------------------------------------------------------------
-    def save(self, path):
+    def save(self, path=None):
         save_dict              = dict()
         save_dict['model']     = self.network.state_dict()
         save_dict['optimizer'] = self.optimizer.state_dict()

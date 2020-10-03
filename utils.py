@@ -8,14 +8,11 @@ from torch.autograd import Variable
 from matplotlib.patches import Rectangle
 
 #-------------------------------------------------------------------------------
-def batchplot(batch, pred, labels):
-    batch_size = len(batch[0])
+def batchplot(batch, groundTruth, pred, labels):
+    batch_size = batch.size(0)
     n_ax = int(math.sqrt(batch_size))
     fig, ax = plt.subplots(n_ax, n_ax)
     ax = ax.flatten()
-    
-    patches   = batch[0]
-    batch_roi = batch[1]
     
     if pred.dim() == 3:
         # Flatten batch ROIs:
@@ -23,17 +20,13 @@ def batchplot(batch, pred, labels):
         batch_num = batch_num.to(pred.dtype)
         pred = torch.cat((batch_num.view(-1,1), pred.view(-1,4)), dim=1)
         
-        # Only keep rois with positive sizes:
-        keep = ((pred[:,3] - pred[:,1] > 0) & (pred[:,4] - pred[:,2] > 0))
-        pred = pred[keep,:]
-    
     for n in range(batch_size):
         # Display the image
-        image = patches[n].permute(1,2,0).numpy()
+        image = batch[n].permute(1,2,0).detach().numpy()
         image = (image + 1) / 2
         ax[n].imshow(image)
             
-        rois = batch_roi[n]
+        rois = groundTruth[n]
         roi_origin = rois[:,[1, 0]].int()
         h = rois[:,2] - rois[:,0] + 1
         w = rois[:,3] - rois[:,1] + 1
@@ -45,7 +38,7 @@ def batchplot(batch, pred, labels):
             
         for p in range(roi_origin.size(0)):
             rect = Rectangle(roi_origin[p].tolist(), int(w[p]), int(h[p]),
-                             linewidth=1,
+                             linewidth=2,
                              edgecolor='b',
                              facecolor='none')
 
@@ -56,6 +49,10 @@ def batchplot(batch, pred, labels):
         positive = labels[n,:].eq(1)
         rois = pred[pred[:,0] == n,:]
         rois = rois[positive, :]
+        
+        # Only keep rois with positive sizes:
+        keep = ((rois[:,3] - rois[:,1] > 0) & (rois[:,4] - rois[:,2] > 0))
+        rois = rois[keep,:]
             
         for p in range(rois.size(0)):
                 
@@ -64,7 +61,7 @@ def batchplot(batch, pred, labels):
             w = rois[p,4] - rois[p,2] + 1
 
             rect = Rectangle(roi_origin.tolist(), int(w), int(h),
-                            linewidth=1,
+                            linewidth=0.5,
                             edgecolor='r',
                             facecolor='none')
 
