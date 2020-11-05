@@ -85,9 +85,9 @@ class FRCNN(nn.Module):
             object bounding boxes and classification labels.
         """
         
-        assert(list(batch.size(0)) == Config.BATCH_SIZE)
-        assert(list(batch.size(2)) == self.image_size(0))
-        assert(list(batch.size(3)) == self.image_size(1))
+        assert(batch.size(0) == Config.BATCH_SIZE)
+        assert(batch.size(2) == self.image_size[0])
+        assert(batch.size(3) == self.image_size[1])
         
         # Get low-level feature map from the CNN. 
         #_______________________________________________________________________
@@ -108,29 +108,43 @@ class FRCNN(nn.Module):
     
     #---------------------------------------------------------------------------
     def __nms__(self, roi_box, roi_prob):
-        """ Apply non-maximal suppression of predicted ROI boxes"""
+        """ Apply non-maximal suppression of predicted ROI boxes
+        
+            Inputs:
+                roi_box  - [B N C 4] tensor of [y1 x1 y2 x2] ROI coordinates
+                roi_prob - [B N C] probabli
+        """
         
         # Define the threshold for score: Only ROIs which pass this lower bound 
         # probability will be selected for supression.
         thr = 0.5
-        
-        box, label, score = list()
+        B, N, C, _ = roi_box.size()
+        bbox, label, score = list(), list(), list()
         
         # Skip the 0th class, which is the background class:
-        roi_box = roi_box.reshape((-1, len(self.classes + 1), 4))
-        for labelid in range(1, len(self.classes) + 1):
-            label_box  = roi_box[:, labelid, :]
-            label_prob = roi_prob[:, labelid]
+        for labelid in range(1, C):
+            cls_box  = torch.squeeze(roi_box[:,:,labelid,:])
+            cls_prob = roi_prob[:,:,labelid]
+            batchids = torch.Tensor(range(B)).repeat_interleave(N)
+            batchids = batchids.to(cls_box.dtype).view(-1,1)
             
-            label_box  = label_box[ label_prob > thr ]
-            label_prob = label_prob[ label_prob > thr ]
+            # Flatten rois and convert batch of boxes to [b y1 x1 y2 x2] format:
+            cls_box  = cls_box.view(B * N, 4)
+            cls_box  = torch.cat((batchids, cls_box), dim=1)
+            cls_prob = cls_prob.view(B * N)
             
-            keep = nms(label_box, label_prob)
+            thr_mask = cls_prob > thr
+            cls_box  = cls_box[thr_mask]
+            cls_prob = cls_prob[thr_mask]
+
+            # Convert to [b x1 y1 x2 y2] for nms:
+            xy_cls_box = cls_box[:,[0,2,1,4,3]]
+            keep = torchvision.ops.nms(xy_cls_box, cls_prob, Config.NMS_THR)
             
             # Labels returned are in [0, NUM_CLASSES - 2].
-            bbox.append(label_box[keep])
+            bbox.append(cls_box[keep])
             label.append((labelid - 1) * torch.ones((len(keep),)))
-            score.append(label_prob[keep])
+            score.append(cls_prob[keep])
             
         bbox  = torch.cat(bbox , dim=0).to(torch.float32)
         label = torch.cat(label, dim=0).to(torch.float32)
@@ -147,42 +161,69 @@ class FRCNN(nn.Module):
         # Set module to evaluation mode:
         self.eval()
         input_size = batch.size()
+        B = input_size[0]
+        C = len(self.classes) + 1
         
         # Preprocess images to rescale and normalize them:
-        tform = transforms.Resize(self.image_size)
+        tform = transforms.Resize(torch.Size(self.image_size[:2]))
         for b in range(batch.size(0)):
             # Resize image to network image size:
-            image = batch[b].permute(1,2,0).numpy()
+            image = batch[b].permute(1,2,0).detach().numpy()
+            image = (image * 255).astype(np.uint8)
             image = tform.__call__(Image.fromarray(image))
             image = torch.from_numpy(np.array(image)).permute(2,0,1)
-            image = image.contiguous()
+            image = image.contiguous().to(torch.float32)
             
             # Normalize image intensity to [-1 1]:
             for c in range(image.size(0)):
-                image[c] = (image[c] - 128) / 128
+                image[c,:,:] = (image[c,:,:] - 128) / 128
 
             # Reset the batch:
             batch[b] = image
         
         # Scale to convert predicted ROI coordinates to image coordinates:
         # NOTE: Assuming square image sizes
-        scale = self.image_size[0] / input_size(2)
+        scale = self.image_size[0] / input_size[2]
         
         # Forward pass:
         roi_targets, roi_scores, proposals = self.forward(batch)
         
         # Rescale proposals & targets and obtain to bounding box coordinates:
-        proposals = proposals / scale
-        yxroi     = targets2box(roi_targets, proposals)
-
+        num_roi     = roi_targets.size(1)
+        cls_targets = roi_targets.view(B, num_roi, C, 4)
+        proposals   = proposals / scale
+        proposals   = proposals.view(B, num_roi, 1, 4).expand_as(cls_targets)
+        
+        # Convert proposals to [ctry ctrx h w]:
+        _eps = np.finfo(np.float).eps
+        ctrhw_prop = torch.stack((
+            torch.mean(proposals[:,:,:,[0,2]], dim=3),
+            torch.mean(proposals[:,:,:,[1,3]], dim=3),
+            torch.clamp(proposals[:,:,:,2] - proposals[:,:,:,0] + 1, min=_eps),
+            torch.clamp(proposals[:,:,:,3] - proposals[:,:,:,1] + 1, min=_eps)
+        ), dim=3)
+        
+        # Convert ROI targets to bounding box vertices:
+        ctry = (cls_targets[:,:,:,0]*ctrhw_prop[:,:,:,2]) + ctrhw_prop[:,:,:,0]
+        ctrx = (cls_targets[:,:,:,1]*ctrhw_prop[:,:,:,3]) + ctrhw_prop[:,:,:,1]
+        h    = ctrhw_prop[:,:,:,2] * torch.exp(cls_targets[:,:,:,2])
+        w    = ctrhw_prop[:,:,:,3] * torch.exp(cls_targets[:,:,:,3])
+        
+        # Convert [ctry ctrx y x] to [y1 x1 y2 x2]
+        ctrhw_bbox = torch.stack((ctry, ctrx, h, w), dim=3)
+        yxroi = torch.stack((
+            ctrhw_bbox[:,:,:,0] - 0.5 * ctrhw_bbox[:,:,:,2],
+            ctrhw_bbox[:,:,:,1] - 0.5 * ctrhw_bbox[:,:,:,3],
+            ctrhw_bbox[:,:,:,0] + 0.5 * ctrhw_bbox[:,:,:,2],
+            ctrhw_bbox[:,:,:,1] + 0.5 * ctrhw_bbox[:,:,:,3]
+        ), dim=3)
+        
         # Convert ROI scores to probabilities:
         roi_prob  = F.softmax(roi_scores, dim=1)
         
         # Clamp the ROI coordinates to the image extents:
-        yxroi[:,:,0].clamp_(min=0, max=input_size[2]-1)
-        yxroi[:,:,1].clamp_(min=0, max=input_size[3]-1)
-        yxroi[:,:,2].clamp_(min=0, max=input_size[2]-1)
-        yxroi[:,:,3].clamp_(min=0, max=input_size[3]-1)
+        yxroi[:,:,:,0::2].clamp_(min=0, max=input_size[2]-1)
+        yxroi[:,:,:,1::2].clamp_(min=0, max=input_size[3]-1)
         
         # Apply non-maximal suppression to narrow down the ROIs from proposals:
         bbox, label, score = self.__nms__(yxroi, roi_prob)
@@ -209,7 +250,7 @@ class RCNNHead(nn.Module):
         #_______________________________________________________________________
         self.Classifier = classifier
         self.RCNNClass  = nn.Linear(4096, num_classes)
-        self.RCNNBBox   = nn.Linear(4096, 4)
+        self.RCNNBBox   = nn.Linear(4096, num_classes * 4)
         self.pool_size  = pool_size
         self.spatial_scale = spatial_scale
       

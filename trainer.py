@@ -199,6 +199,9 @@ class FRCNNTrainer(nn.Module):
         )
         self.iterator = None
         
+        # Saved network path:
+        self.saved_network = None
+        
         # Initialize network inputs:
         image_size  = ([Config.BATCH_SIZE] + Config.IMAGE_SIZE)
         roi_size    = (Config.BATCH_SIZE,Config.NUM_ROI,4)
@@ -394,6 +397,7 @@ class FRCNNTrainer(nn.Module):
             os.makedirs(save_dir)
 
         torch.save(save_dict, path)
+        self.saved_network = path
     
     #---------------------------------------------------------------------------
     def load(self, path):

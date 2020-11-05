@@ -82,7 +82,7 @@ class STACCarribeanDataset(BigtiffDataset):
                 raise TypeError('Must be numpy array or torch tensor.')
             """
         
-        return patch, rois
+        return patch, rois, index
         
     # --------------------------------------------------------------------------
     def __getrois__(self, index):
@@ -114,6 +114,7 @@ class STACCarribeanDataset(BigtiffDataset):
         """Collation function to be used with data loaders"""
         
         images   = []
+        indices  = []
         roi_size = 5 if self.Train else 4
         rois     = torch.zeros((len(batch), 20, roi_size), dtype=torch.float32)
         rois     = rois.to(batch[0][1].device)
@@ -121,6 +122,7 @@ class STACCarribeanDataset(BigtiffDataset):
         for _b in range(len(batch)):
             # Accumulate patches:
             images.append(batch[_b][0].to(torch.float32))
+            indices.append(batch[_b][2])
             
             # Accumulate ROI:
             """
@@ -133,8 +135,9 @@ class STACCarribeanDataset(BigtiffDataset):
             num_boxes   = batch[_b][1].size(0)
             rois[_b,:num_boxes,:] = batch[_b][1]
             
+            
         # Stack outputs and return
-        batch = [torch.stack(images, dim=0), rois]
+        batch = [torch.stack(images, dim=0), rois, torch.Tensor(indices)]
         return batch
     
     # --------------------------------------------------------------------------
